@@ -101,6 +101,11 @@ else ()
     add_definitions(-DESC_DEBUG) # ESC Debug
 endif ()
 
+include_directories(
+    Middlewares/Third_Party/FreeRTOS/Source/include
+    Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM4F
+)
+
 # build binary and hex file
 add_executable(${PROJECT_NAME}.elf  ${SOURCES} ${ASM_SOURCES} ${LINKER_SCRIPT})
 target_link_libraries(${PROJECT_NAME}.elf ${DSP_NAME} m) # link DSP lib and math lib
@@ -112,4 +117,4 @@ add_custom_command(
     COMMENT "Building hex & bin file..."
     COMMENT "EXCUTABLE SIZE:"
     COMMAND ${SIZE} ${PROJECT_NAME}.elf
-  )
+)

@@ -66,7 +66,7 @@ LKMotorInstance *LKMotorInit(Motor_Init_Config_s *config)
     config->can_init_config.id = motor;
     config->can_init_config.can_module_callback = LKMotorDecode;
     config->can_init_config.rx_id = 0x140 + config->can_init_config.tx_id;
-    config->can_init_config.tx_id = config->can_init_config.tx_id + 0x280 - 1; // 这样在发送写入buffer的时候更方便,因为下标从0开始,LK多电机发送id为0x280
+    config->can_init_config.tx_id = 0x280 ; // 这样在发送写入buffer的时候更方便,因为下标从0开始,LK多电机发送id为0x280
     motor->motor_can_ins = CANRegister(&config->can_init_config);
 
     if (idx == 0) // 用第一个电机的can instance发送数据

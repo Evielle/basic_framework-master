@@ -17,6 +17,8 @@
 
 #include "bsp_log.h"
 
+#include "zero_angle.h"
+
 osThreadId insTaskHandle;
 osThreadId robotTaskHandle;
 osThreadId motorTaskHandle;
@@ -28,6 +30,8 @@ void StartMOTORTASK(void const *argument);
 void StartDAEMONTASK(void const *argument);
 void StartROBOTTASK(void const *argument);
 void StartUITASK(void const *argument);
+
+
 
 /**
  * @brief 初始化机器人任务,所有持续运行的任务都在这里初始化
@@ -77,11 +81,27 @@ __attribute__((noreturn)) void StartMOTORTASK(void const *argument)
 {
     static float motor_dt;
     static float motor_start;
+    // static uint8_t test_flag = 1;     // 新增测试标志
     LOGINFO("[freeRTOS] MOTOR Task Start");
+
     for (;;)
     {
         motor_start = DWT_GetTimeline_ms();
-        MotorControlTask();
+        if(zero_state == ZERO_RUNNING){
+            ZeroProcess();// 校准进行中：完全由 ZeroProcess 控制电机，跳过常规控制
+        }
+        else{
+            MotorControlTask();// 非校准状态：正常电机控制
+            ZeroProcess();// 仍然调用一次 ZeroProcess，以便处理 DONE→IDLE 等状态切换
+        }
+        // ----- 测试用：首次进入循环时启动校准 -----
+        // if (test_flag)
+        // {
+        //     test_flag = 0;
+        //     ZeroStart();              // 手动触发
+        //     LOGINFO("[Test] ZeroStart called manually");
+        // }       
+        //原有耗时检测
         motor_dt = DWT_GetTimeline_ms() - motor_start;
         if (motor_dt > 1)
             LOGERROR("[freeRTOS] MOTOR Task is being DELAY! dt = [%f]", &motor_dt);

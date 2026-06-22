@@ -1,4 +1,4 @@
-#include "LK9025.h"
+#include "LK7015.h"
 #include "stdlib.h"
 #include "general_def.h"
 #include "daemon.h"
@@ -6,22 +6,16 @@
 #include "bsp_log.h"
 
 static uint8_t idx;
-static LKMotorInstance *lkmotor_instance[LK_MOTOR_MX_CNT] = {NULL};
-static CANInstance *sender_instance; // 多电机发送时使用的caninstance(当前保存的是注册的第一个电机的caninstance)
-// 后续考虑兼容单电机和多电机指令.
+static LK7015Instance *lkmotor_instance[LK7015_MOTOR_MX_CNT] = {NULL};
+static CANInstance *sender_instance;
 
-/**
- * @brief 电机反馈报文解析
- *
- * @param _instance 发生中断的caninstance
- */
-static void LKMotorDecode(CANInstance *_instance)
+static void LK7015Decode(CANInstance *_instance)
 {
-    LKMotorInstance *motor = (LKMotorInstance *)_instance->id; // 通过caninstance保存的father id获取对应的motorinstance
-    LKMotor_Measure_t *measure = &motor->measure;
+    LK7015Instance *motor = (LK7015Instance *)_instance->id;
+    LK7015_Measure_t *measure = &motor->measure;
     uint8_t *rx_buff = _instance->rx_buff;
 
-    DaemonReload(motor->daemon); // 喂狗
+    DaemonReload(motor->daemon);
     measure->feed_dt = DWT_GetDeltaT(&measure->feed_dwt_cnt);
 
     measure->last_ecd = measure->ecd;
@@ -44,20 +38,19 @@ static void LKMotorDecode(CANInstance *_instance)
     measure->total_angle = measure->total_round * 360 + measure->angle_single_round;
 }
 
-static void LKMotorLostCallback(void *motor_ptr)
+static void LK7015LostCallback(void *motor_ptr)
 {
-    LKMotorInstance *motor = (LKMotorInstance *)motor_ptr;
-    LOGWARNING("[LKMotor] motor lost, id: %d", motor->motor_can_ins->tx_id);
+    LK7015Instance *motor = (LK7015Instance *)motor_ptr;
+    LOGWARNING("[LK7015] motor lost, id: %d", motor->motor_can_ins->tx_id);
 }
 
-LKMotorInstance *LKMotorInit(Motor_Init_Config_s *config)
+LK7015Instance *LK7015Init(Motor_Init_Config_s *config)
 {
-    LKMotorInstance *motor = (LKMotorInstance *)malloc(sizeof(LKMotorInstance));
+    LK7015Instance *motor = (LK7015Instance *)malloc(sizeof(LK7015Instance));
     if (motor == NULL) {
-    // 处理内存分配失败
-    return NULL;
+        return NULL;
     }
-    memset(motor, 0, sizeof(LKMotorInstance));
+    memset(motor, 0, sizeof(LK7015Instance));
 
     motor->motor_settings = config->controller_setting_init_config;
     PIDInit(&motor->current_PID, &config->controller_param_init_config.current_PID);
@@ -67,38 +60,37 @@ LKMotorInstance *LKMotorInit(Motor_Init_Config_s *config)
     motor->other_speed_feedback_ptr = config->controller_param_init_config.other_speed_feedback_ptr;
 
     config->can_init_config.id = motor;
-    config->can_init_config.can_module_callback = LKMotorDecode;
+    config->can_init_config.can_module_callback = LK7015Decode;
     config->can_init_config.rx_id = 0x140 + config->can_init_config.tx_id;
-    config->can_init_config.tx_id = config->can_init_config.tx_id + 0x280 - 1 ; // 这样在发送写入buffer的时候更方便,因为下标从0开始,LK多电机发送id为0x280
+    config->can_init_config.tx_id = config->can_init_config.tx_id + 0x280 - 1;
     motor->motor_can_ins = CANRegister(&config->can_init_config);
 
-    if (idx == 0) // 用第一个电机的can instance发送数据
+    if (idx == 0)
     {
         sender_instance = motor->motor_can_ins;
-        sender_instance->tx_id = 0x280; //  修改tx_id为0x280,用于多电机发送,不用管其他LKMotorInstance的tx_id,它们仅作初始化用
+        sender_instance->tx_id = 0x280;
     }
 
-    LKMotorEnable(motor);
+    LK7015Enable(motor);
     DWT_GetDeltaT(&motor->measure.feed_dwt_cnt);
     lkmotor_instance[idx++] = motor;
 
     Daemon_Init_Config_s daemon_config = {
-        .callback = LKMotorLostCallback,
+        .callback = LK7015LostCallback,
         .owner_id = motor,
-        .reload_count = 5, // 50ms
+        .reload_count = 5,
     };
     motor->daemon = DaemonRegister(&daemon_config);
 
     return motor;
 }
 
-/* 第一个电机的can instance用于发送数据,向其tx_buff填充数据 */
-void LKMotorControl()
+void LK7015Control(void)
 {
     float pid_measure, pid_ref;
     int16_t set;
-    LKMotorInstance *motor;
-    LKMotor_Measure_t *measure;
+    LK7015Instance *motor;
+    LK7015_Measure_t *measure;
     Motor_Control_Setting_s *setting;
 
     for (size_t i = 0; i < idx; ++i)
@@ -139,35 +131,34 @@ void LKMotorControl()
 
         set = (int16_t)pid_ref;
 
-        // 这里随便写的,为了兼容多电机命令.后续应该将tx_id以更好的方式表达电机id,单独使用一个CANInstance,而不是用第一个电机的CANInstance
         memcpy(sender_instance->tx_buff + (motor->motor_can_ins->tx_id - 0x280) * 2, &set, sizeof(uint16_t));
 
         if (motor->stop_flag == MOTOR_STOP)
-        { // 若该电机处于停止状态,直接将发送buff置零
+        {
             memset(sender_instance->tx_buff + (motor->motor_can_ins->tx_id - 0x280) * 2, 0, sizeof(uint16_t));
         }
     }
 
-    if (idx) // 如果有电机注册了
+    if (idx)
         CANTransmit(sender_instance, 0.2);
 }
 
-void LKMotorStop(LKMotorInstance *motor)
+void LK7015Stop(LK7015Instance *motor)
 {
     motor->stop_flag = MOTOR_STOP;
 }
 
-void LKMotorEnable(LKMotorInstance *motor)
+void LK7015Enable(LK7015Instance *motor)
 {
     motor->stop_flag = MOTOR_ENALBED;
 }
 
-void LKMotorSetRef(LKMotorInstance *motor, float ref)
+void LK7015SetRef(LK7015Instance *motor, float ref)
 {
     motor->pid_ref = ref;
 }
 
-uint8_t LKMotorIsOnline(LKMotorInstance *motor)
+uint8_t LK7015IsOnline(LK7015Instance *motor)
 {
     if (motor == NULL) return 0;
     return DaemonIsOnline(motor->daemon);

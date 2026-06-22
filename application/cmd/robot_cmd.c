@@ -156,13 +156,18 @@ static void RemoteControlSet()
     // 控制底盘和云台运行模式,云台待添加,云台是否始终使用IMU数据?
     if (switch_is_down(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[下],底盘跟随云台
     {
-        chassis_cmd_send.chassis_mode = CHASSIS_ROTATE;
+        chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
     }
     else if (switch_is_mid(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[中],底盘和云台分离,底盘保持不转动
     {
         chassis_cmd_send.chassis_mode = CHASSIS_NO_FOLLOW;
         gimbal_cmd_send.gimbal_mode = GIMBAL_FREE_MODE;
+    }
+    else if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],零力模式
+    {
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
     }
 
     // 云台参数,确定云台控制数据
@@ -179,9 +184,10 @@ static void RemoteControlSet()
     }
     // 云台软件限位
 
-    // 底盘参数,目前没有加入小陀螺(调试似乎暂时没有必要),系数需要调整
-    chassis_cmd_send.vx = 10.0f * (float)rc_data[TEMP].rc.rocker_r_; // _水平方向
-    chassis_cmd_send.vy = 10.0f * (float)rc_data[TEMP].rc.rocker_r1; // 1数值方向
+    // 底盘参数,统一速度量纲为档位 [-10, 10],后续由chassis自行换算
+    chassis_cmd_send.vx = (float)rc_data[TEMP].rc.rocker_r_ / 66.0f;  // 右摇杆水平
+    chassis_cmd_send.vy = (float)rc_data[TEMP].rc.rocker_r1 / 66.0f;  // 右摇杆竖直
+    chassis_cmd_send.wz = (float)rc_data[TEMP].rc.rocker_r_ / 66.0f;  // 右摇杆水平控制旋转
 
     // 发射参数
     if (switch_is_up(rc_data[TEMP].rc.switch_right)) // 右侧开关状态[上],弹舱打开
@@ -307,8 +313,8 @@ static void EmergencyHandler()
         shoot_cmd_send.load_mode = LOAD_STOP;
         LOGERROR("[CMD] emergency stop!");
     }
-    // 遥控器右侧开关为[上],恢复正常运行
-    if (switch_is_up(rc_data[TEMP].rc.switch_right))
+    // 拨轮归位且处于急停状态时恢复
+    if (rc_data[TEMP].rc.dial < 300 && robot_state == ROBOT_STOP)
     {
         robot_state = ROBOT_READY;
         shoot_cmd_send.shoot_mode = SHOOT_ON;
@@ -321,14 +327,60 @@ void RobotCMDTask()
 {
    // BMI088Acquire(bmi088_test,&bmi088_data) ;
     // 从其他应用获取回传数据
+/* 消息超时检测: 连续多次未收到消息则判定离线 */
+    static uint8_t gimbal_miss_count = 0;
+    static uint8_t chassis_miss_count = 0;
+
+    /* 遥控器离线检测 */
+    if (!RemoteControlIsOnline()) {
+        robot_state = ROBOT_STOP;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        shoot_cmd_send.shoot_mode = SHOOT_OFF;
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode = LOAD_STOP;
+        LOGERROR("[CMD] Remote control offline, emergency stop!");
+    }
+
 #ifdef ONE_BOARD
-    SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data);
+    if (SubGetMessage(chassis_feed_sub, (void *)&chassis_fetch_data) == 0) {
+        chassis_miss_count++;
+    } else {
+        chassis_miss_count = 0;
+    }
 #endif // ONE_BOARD
 #ifdef GIMBAL_BOARD
-    chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
+    if (CANCommIsOnline(cmd_can_comm)) {
+        chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
+    } else {
+        chassis_miss_count++;
+        robot_state = ROBOT_STOP;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        shoot_cmd_send.shoot_mode = SHOOT_OFF;
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode = LOAD_STOP;
+        LOGERROR("[CMD] CANComm offline, emergency stop!");
+    }
 #endif // GIMBAL_BOARD
     SubGetMessage(shoot_feed_sub, &shoot_fetch_data);
-    SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data);
+
+    if (SubGetMessage(gimbal_feed_sub, &gimbal_fetch_data) == 0) {
+        gimbal_miss_count++;
+    } else {
+        gimbal_miss_count = 0;
+    }
+
+    /* 如果连续100次(500ms)未收到消息，触发急停 */
+    if (gimbal_miss_count > 100 || chassis_miss_count > 100) {
+        LOGERROR("[CMD] Message timeout, triggering emergency stop!");
+        robot_state = ROBOT_STOP;
+        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+        shoot_cmd_send.shoot_mode = SHOOT_OFF;
+        shoot_cmd_send.friction_mode = FRICTION_OFF;
+        shoot_cmd_send.load_mode = LOAD_STOP;
+    }
 
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
     CalcOffsetAngle();
@@ -345,6 +397,10 @@ void RobotCMDTask()
 
     // 推送消息,双板通信,视觉通信等
     // 其他应用所需的控制数据在remotecontrolsetmode和mousekeysetmode中完成设置
+// 将云台姿态数据传递给底盘
+    chassis_cmd_send.gimbal_yaw_angle = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
+    chassis_cmd_send.gimbal_wz = gimbal_fetch_data.gimbal_imu_data.Gyro[2];
+
 #ifdef ONE_BOARD
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
 #endif // ONE_BOARD

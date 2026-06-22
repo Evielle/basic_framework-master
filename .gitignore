@@ -53,3 +53,22 @@ build
 .vscode/.cortex-debug.registers.state.json
 *.jdebug*
 .aider*
+
+# CMake build files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+Makefile
+*.bin
+*.hex
+
+# STM32 specific
+*.ioc
+*.svd
+*.ld
+
+# Project files
+.mxproject
+.settings/
+.stm32env

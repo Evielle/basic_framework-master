@@ -126,9 +126,22 @@ uint64_t DWT_GetTimeline_us(void)
 
 void DWT_Delay(float Delay)
 {
-    uint32_t tickstart = DWT->CYCCNT;
-    float wait = Delay;
+    if (Delay <= 0.0f)
+        return;
 
-    while ((DWT->CYCCNT - tickstart) < wait * (float)CPU_FREQ_Hz)
-        ;
+    uint32_t tickstart = DWT->CYCCNT;
+    uint32_t wait_cycles = (uint32_t)(Delay * (float)CPU_FREQ_Hz);
+
+    if (wait_cycles == 0)
+        return;
+
+    while (1)
+    {
+        uint32_t elapsed = (uint32_t)(DWT->CYCCNT - tickstart);
+        if (elapsed >= wait_cycles)
+            break;
+
+        if (elapsed > (UINT32_MAX >> 1))
+            DWT_CNT_Update();
+    }
 }

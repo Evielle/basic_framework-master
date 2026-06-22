@@ -5,6 +5,7 @@
 #include "message_center.h"
 #include "general_def.h"
 #include "bmi088.h"
+#include <math.h>
 
 static attitude_t *gimba_IMU_data; // 云台IMU数据
 static DJIMotorInstance *yaw_motor, *pitch_motor;
@@ -106,6 +107,99 @@ void GimbalTask()
     // 后续增加未收到数据的处理
     SubGetMessage(gimbal_sub, &gimbal_cmd_recv);
 
+    // IMU数据有效性检测
+    static float last_yaw_angle = 0.0f;
+    static float last_pitch_angle = 0.0f;
+    static uint8_t imu_freeze_count = 0;
+    static uint8_t imu_error_flag = 0;
+    static uint8_t imu_error_logged = 0;
+    static uint16_t imu_recovery_count = 0;
+
+    // 1. 检查IMU数据是否在合理范围内
+    if (gimba_IMU_data->YawTotalAngle < -18000.0f || gimba_IMU_data->YawTotalAngle > 18000.0f ||
+        gimba_IMU_data->Pitch < -90.0f || gimba_IMU_data->Pitch > 90.0f)
+    {
+        imu_error_flag = 1;
+    }
+
+    // 2. 检查IMU数据是否冻结(连续10帧相同), 仅在IMU正常时检测
+    if (!imu_error_flag)
+    {
+        float yaw_diff = gimba_IMU_data->YawTotalAngle - last_yaw_angle;
+        float pitch_diff = gimba_IMU_data->Pitch - last_pitch_angle;
+        if (fabsf(yaw_diff) < 0.01f && fabsf(pitch_diff) < 0.01f)
+        {
+            imu_freeze_count++;
+            if (imu_freeze_count >= 10)
+            {
+                imu_error_flag = 1;
+            }
+        }
+        else
+        {
+            imu_freeze_count = 0;
+            last_yaw_angle = gimba_IMU_data->YawTotalAngle;
+            last_pitch_angle = gimba_IMU_data->Pitch;
+        }
+    }
+
+    // 3. IMU异常时切换到电机编码器反馈
+    if (imu_error_flag)
+    {
+        if (!imu_error_logged)
+        {
+            LOGERROR("[GIMBAL] IMU data invalid, switching to motor encoder feedback");
+            imu_error_logged = 1;
+        }
+        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, MOTOR_FEED);
+        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, MOTOR_FEED);
+        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, MOTOR_FEED);
+        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, MOTOR_FEED);
+    }
+
+    // 4. IMU数据恢复检测
+    if (imu_error_flag)
+    {
+        // 检查数据是否在合理范围内
+        if (gimba_IMU_data->YawTotalAngle >= -18000.0f && gimba_IMU_data->YawTotalAngle <= 18000.0f &&
+            gimba_IMU_data->Pitch >= -90.0f && gimba_IMU_data->Pitch <= 90.0f)
+        {
+            float yaw_diff = gimba_IMU_data->YawTotalAngle - last_yaw_angle;
+            float pitch_diff = gimba_IMU_data->Pitch - last_pitch_angle;
+            // 数据在变化（未冻结），认为IMU恢复正常
+            if (fabsf(yaw_diff) > 0.01f || fabsf(pitch_diff) > 0.01f)
+            {
+                imu_recovery_count++;
+                last_yaw_angle = gimba_IMU_data->YawTotalAngle;
+                last_pitch_angle = gimba_IMU_data->Pitch;
+            }
+            else
+            {
+                imu_recovery_count = 0;
+            }
+        }
+        else
+        {
+            imu_recovery_count = 0;
+        }
+
+        if (imu_recovery_count >= 100)
+        {
+            imu_error_flag = 0;
+            imu_error_logged = 0;
+            imu_recovery_count = 0;
+            LOGERROR("[GIMBAL] IMU data recovered, switching back to IMU feedback");
+            DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
+            DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
+            DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
+            DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
+        }
+    }
+    else
+    {
+        imu_recovery_count = 0;
+    }
+
     // @todo:现在已不再需要电机反馈,实际上可以始终使用IMU的姿态数据来作为云台的反馈,yaw电机的offset只是用来跟随底盘
     // 根据控制模式进行电机反馈切换和过渡,视觉模式在robot_cmd模块就已经设置好,gimbal只看yaw_ref和pitch_ref
     switch (gimbal_cmd_recv.gimbal_mode)
@@ -119,10 +213,13 @@ void GimbalTask()
     case GIMBAL_GYRO_MODE: // 后续只保留此模式
         DJIMotorEnable(yaw_motor);
         DJIMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
+        if (!imu_error_flag)
+        {
+            DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
+            DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
+            DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
+            DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
+        }
         DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
         break;
@@ -130,10 +227,10 @@ void GimbalTask()
     case GIMBAL_FREE_MODE: // 后续删除,或加入云台追地盘的跟随模式(响应速度更快)
         DJIMotorEnable(yaw_motor);
         DJIMotorEnable(pitch_motor);
-        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, OTHER_FEED);
-        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, OTHER_FEED);
+        DJIMotorChangeFeed(yaw_motor, ANGLE_LOOP, MOTOR_FEED);
+        DJIMotorChangeFeed(yaw_motor, SPEED_LOOP, MOTOR_FEED);
+        DJIMotorChangeFeed(pitch_motor, ANGLE_LOOP, MOTOR_FEED);
+        DJIMotorChangeFeed(pitch_motor, SPEED_LOOP, MOTOR_FEED);
         DJIMotorSetRef(yaw_motor, gimbal_cmd_recv.yaw); // yaw和pitch会在robot_cmd中处理好多圈和单圈
         DJIMotorSetRef(pitch_motor, gimbal_cmd_recv.pitch);
         break;

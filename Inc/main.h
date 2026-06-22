@@ -79,11 +79,15 @@ void Error_Handler(void);
 #define INT_ACC_Pin GPIO_PIN_4
 #define INT_ACC_GPIO_Port GPIOC
 #define INT_ACC_EXTI_IRQn EXTI4_IRQn
+#define LightGateR_Pin GPIO_PIN_13
+#define LightGateR_GPIO_Port GPIOE
 #define INT_GYRO_Pin GPIO_PIN_5
 #define INT_GYRO_GPIO_Port GPIOC
 #define INT_GYRO_EXTI_IRQn EXTI9_5_IRQn
 #define SERVO_Pin GPIO_PIN_9
 #define SERVO_GPIO_Port GPIOE
+#define LightGateL_Pin GPIO_PIN_11
+#define LightGateL_GPIO_Port GPIOE
 #define CS1_GYRO_Pin GPIO_PIN_0
 #define CS1_GYRO_GPIO_Port GPIOB
 

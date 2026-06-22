@@ -22,9 +22,12 @@ static DaemonInstance *rc_daemon_instance;
  */
 static void RectifyRCjoystick()
 {
-    for (uint8_t i = 0; i < 5; ++i)
-        if (abs(*(&rc_ctrl[TEMP].rc.rocker_l_ + i)) > 660)
-            *(&rc_ctrl[TEMP].rc.rocker_l_ + i) = 0;
+    for (uint8_t i = 0; i < 5; ++i){
+        if (*(&rc_ctrl[TEMP].rc.rocker_l_ + i)> 660)
+            *(&rc_ctrl[TEMP].rc.rocker_l_ + i) = 660;
+        if (*(&rc_ctrl[TEMP].rc.rocker_l_ + i) < -660)
+            *(&rc_ctrl[TEMP].rc.rocker_l_ + i) = -660;
+    }
 }
 
 /**

@@ -12,6 +12,9 @@
  */
 
 #include "chassis.h"
+#include "controller.h"
+#include "dji_motor.h"
+#include "motor_def.h"
 #include "robot_def.h"
 #include "power_control.h"
 #include "super_cap.h"
@@ -22,13 +25,27 @@
 #include "bsp_dwt.h"
 #include "referee_UI.h"
 #include "arm_math.h"
-#include "LK9025.h"
+#include "LK7015.h"
 #include "zero_angle.h"
+#include "robot_cmd.h"
+#include "InverseKinematics.h"
+#include "bsp_log.h"
 
 /* 根据robot_def.h中的macro自动计算的参数 */
 #define HALF_WHEEL_BASE (WHEEL_BASE / 2.0f)     // 半轴距
 #define HALF_TRACK_WIDTH (TRACK_WIDTH / 2.0f)   // 半轮距
 #define PERIMETER_WHEEL (RADIUS_WHEEL * 2 * PI) // 轮子周长
+#define L_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X) /1000.f)//半轮距，转换为m
+#define R_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X) /1000.f)//半轮距，转换为m
+#define ECD_ANGLE_COEF_ZF 0.08789f // (360/4096),将舵轮M3508编码器值转化为角度制
+#define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_ZF) // 对齐时的角度,0-360
+#define RADIUS_WHEEL_M       0.0525f                          // 驱动轮，轮子半径，单位米
+#define REDUCTION_RATIO_WHEEL 19.0f                          // 驱动减速比
+#define REDUCTION_RATIO_STEER 8.0f                           // 转向减速比
+
+// 舵轮安装方位角（弧度）
+#define AZIMUTH_FRONT        0.0f
+#define AZIMUTH_REAR         PI
 
 /* 底盘应用包含的模块和信息存储,底盘是单例模式,因此不需要为底盘建立单独的结构体 */
 #ifdef CHASSIS_BOARD // 如果是底盘板,使用板载IMU获取底盘转动角速度
@@ -48,242 +65,218 @@ static PIDInstance buffer_PID;             // 用于底盘的缓冲能量PID
 static referee_info_t *referee_data;       // 用于获取裁判系统的数据
 static Referee_Interactive_info_t ui_data; // UI数据，将底盘中的数据传入此结构体的对应变量中，UI会自动检测是否变化，对应显示UI
 
-static SuperCapInstance *cap;                                       // 超级电容
-static DJIMotorInstance *motor_lf, *motor_rf, *motor_lb, *motor_rb; // left right forward back
+// static SuperCapInstance *cap;                                       // 超级电容
+static ChassisMotorContext motor_ctx;  // 在 .bss 段分配，生命周期等同全局
+static DJIMotorInstance *motor_l, *motor_r; // 大疆M3508电机实例
+static LK7015Instance *motor_l_lk,*motor_r_lk;   //LK7015电机实例
+static ZeroAngleInstance *zero_angle_l,*zero_angle_r;//光电门实例
 
+static uint8_t zero_angle_done = 0;                                 //为完成校准为零，完成校准为一
+// static float chassis_wz_ref,chassis_vx_ref,chassis_vy_ref; //底盘角速度目标值
+// static Chassis_Velocity_s chassis_velocity;
 /* 用于自旋变速策略的时间变量 */
 // static float t;
-
+// static volatile float test_speed_measure = 0;
+// static volatile float motor_rf_AngleRef = 0.0f;
+// static volatile float motor_lb_AngleRef = 0.0f;
+// static volatile float motor_rf_lk_SpeedRef = 0.0f;
+// static volatile float motor_lb_lk_SpeedRef = 0.0f;
 /* 私有函数计算的中介变量,设为静态避免参数传递的开销 */
-static float chassis_vx, chassis_vy;                      // 将云台系的速度投影到底盘
+static float chassis_vx=0;
+static float chassis_vy=0;
+static float chassis_wz=0;                      // 将云台系的速度投影到底盘
 static float vt_lf, vt_rf, vt_lb, vt_rb;                  // 底盘速度解算后的临时输出,待进行限幅
+
 
 void ChassisInit()
 {
      // 四个轮子的参数一样,改tx_id和反转标志位即可
-    Motor_Init_Config_s chassis_motor_config = {
+    Motor_Init_Config_s motor_m3508_config = {
         .can_init_config.can_handle = &hcan2,
         .controller_param_init_config = {
-            .speed_PID = {
-                .Kp = 1.5, // 1.5
-                .Ki = 0.4,   // 0.4
-                .Kd = 0,   // 0
-                .IntegralLimit = 3000,
+            .angle_PID = {
+                .Kp = 0.8,
+                .Ki = 0.2,
+                .Kd = 0,
+                .IntegralLimit = 6000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .MaxOut = 15000,
-                .Output_LPF_RC = 0.3,
+                .MaxOut = 16384,
             },
+            .speed_PID = {
+                .Kp = 0.8,
+                .Ki = 0.1,
+                .Kd = 0,
+                .IntegralLimit = 2000,
+                .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
+                .MaxOut = 3500,
+            },
+            .other_angle_feedback_ptr = NULL,
         },
         .controller_setting_init_config = {
-            .angle_feedback_source = MOTOR_FEED,
+            .angle_feedback_source = OTHER_FEED,
             .speed_feedback_source = MOTOR_FEED,
-            .outer_loop_type = SPEED_LOOP, // 设置为开环，电机设定值由下面的功率控制设定，不走普通的pid
-            .close_loop_type = SPEED_LOOP,
+            .outer_loop_type = ANGLE_LOOP,
+            .close_loop_type = ANGLE_AND_SPEED_LOOP,
         },
         .motor_type = M3508,
     };
-    chassis_motor_config.can_init_config.tx_id = 1;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    motor_rf = DJIMotorInit(&chassis_motor_config);//右前方舵机
-    chassis_motor_config.can_init_config.tx_id = 2;
-    chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    motor_lb = DJIMotorInit(&chassis_motor_config);//左后方舵机
+    motor_m3508_config.can_init_config.tx_id = 1;
+    motor_m3508_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    motor_l = DJIMotorInit(&motor_m3508_config);//左舵机
+    motor_m3508_config.can_init_config.tx_id = 2;
+    motor_m3508_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_REVERSE;
+    motor_r = DJIMotorInit(&motor_m3508_config);//右舵机
 
-    ZeroConfig_t cali_cfg = {
-        .motor_cfg = {
-            { .motor = motor_rf,   .gate_pin = GPIO_PIN_11 },
-            { .motor = motor_lb, .gate_pin = GPIO_PIN_13 }
+    Motor_Init_Config_s motor_lk9025_config = {
+    .can_init_config.can_handle = &hcan2,
+    .controller_param_init_config = {
+        .speed_PID = {
+            .Kp = 2.2,
+            .Ki = 1.2,
+            .Kd = 0,
+            .IntegralLimit = 2000,
+            .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
+            .MaxOut = 8000,
+            },
         },
-        .cali_speed = 150.0f,      // 低速旋转
-        .timeout_ms = 5000         // 5秒超时
+        .controller_setting_init_config = {
+            .speed_feedback_source = MOTOR_FEED,
+            .outer_loop_type = SPEED_LOOP,
+            .close_loop_type = SPEED_LOOP,
+        },
+        .motor_type = LK7015,
     };
-    ZeroInit(&cali_cfg);
- 
+    motor_lk9025_config.can_init_config.tx_id = 1;
+    motor_lk9025_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    motor_l_lk = LK7015Init(&motor_lk9025_config);  // 左驱, CAN ID=1
+    motor_lk9025_config.can_init_config.tx_id = 2;
+    motor_lk9025_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
+    motor_r_lk = LK7015Init(&motor_lk9025_config);  // 右驱, CAN ID=2
 
-   
-    //  @todo: 当前还没有设置电机的正反转,仍然需要手动添加reference的正负号,需要电机module的支持,待修改.
-    //使用功率控制的电机需要使用PowerControlInit()函数初始化,因为电机的控制方式不同
-    // chassis_motor_config.can_init_config.tx_id = 1;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_lf = PowerControlInit(&chassis_motor_config);
-    // DJIMotorSetRef(motor_lf, 2000);
+    zero_angle_l=ZeroAngleInit(LightGateL_Pin,motor_l);
+    zero_angle_r=ZeroAngleInit(LightGateR_Pin,motor_r);
+    
+    motor_ctx.steer_left  = motor_l;
+    motor_ctx.steer_right = motor_r;
+    motor_ctx.drive_left  = motor_l_lk;
+    motor_ctx.drive_right = motor_r_lk;
+    motor_ctx.zero_left   = zero_angle_l;
+    motor_ctx.zero_right  = zero_angle_r;
+    InverseKinematics_Init(&motor_ctx);
 
 
-    // chassis_motor_config.can_init_config.tx_id = 2;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_rf = PowerControlInit(&chassis_motor_config);
-    // motor_rf=LKMotorInit(&chassis_motor_config);
-    // LKMotorSetRef(motor_rf, 2000);
+    // 发布订阅初始化,如果为双板,则需要can comm来传递消息
+#ifdef CHASSIS_BOARD
+    Chassis_IMU_data = INS_Init(); // 底盘IMU初始化
 
-    // chassis_motor_config.can_init_config.tx_id = 4;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_lb = PowerControlInit(&chassis_motor_config);
+    CANComm_Init_Config_s comm_conf = {
+        .can_config = {
+            .can_handle = &hcan1,
+            .tx_id = 0x311,
+            .rx_id = 0x312,
+        },
+        .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
+        .send_data_len = sizeof(Chassis_Upload_Data_s),
+    };
+    chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
+#endif                                          // CHASSIS_BOARD
 
-    // chassis_motor_config.can_init_config.tx_id = 3;
-    // chassis_motor_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
-    // motor_rb = PowerControlInit(&chassis_motor_config);
-
-    // referee_data = UITaskInit(&huart6, &ui_data); // 裁判系统初始化,会同时初始化UI
-
-/* Buffer环暂未测试，逻辑是计算期望buffer与实际buffer的差值，转换为冗余的功率，todo：输入给功率控制部分，待完善 */
-//     PID_Init_Config_s Buffer_pid_conf = {
-//         .Kp = 0.1,
-//         .Ki = 0,
-//         .Kd = 0,
-//         .IntegralLimit = 1000,
-//         .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-//         .MaxOut = 1000,
-//     };
-//     PIDInit(&buffer_PID, &Buffer_pid_conf); // 缓冲能量PID初始化
-//     SuperCap_Init_Config_s cap_conf = {
-//         .can_config = {
-//             .can_handle = &hcan2,
-//             .tx_id = 0x302, // 超级电容默认接收id
-//             .rx_id = 0x301, // 超级电容默认发送id,注意tx和rx在其他人看来是反的
-//         }};
-//     cap = SuperCapInit(&cap_conf); // 超级电容初始化
-
-//     // 发布订阅初始化,如果为双板,则需要can comm来传递消息
-// #ifdef CHASSIS_BOARD
-//     Chassis_IMU_data = INS_Init(); // 底盘IMU初始化
-
-//     CANComm_Init_Config_s comm_conf = {
-//         .can_config = {
-//             .can_handle = &hcan2,
-//             .tx_id = 0x311,
-//             .rx_id = 0x312,
-//         },
-//         .recv_data_len = sizeof(Chassis_Ctrl_Cmd_s),
-//         .send_data_len = sizeof(Chassis_Upload_Data_s),
-//     };
-//     chasiss_can_comm = CANCommInit(&comm_conf); // can comm初始化
-// #endif                                          // CHASSIS_BOARD
-
-// #ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
-//     chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
-//     chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
-// #endif // ONE_BOARD
+#ifdef ONE_BOARD // 单板控制整车,则通过pubsub来传递消息
+    chassis_sub = SubRegister("chassis_cmd", sizeof(Chassis_Ctrl_Cmd_s));
+    chassis_pub = PubRegister("chassis_feed", sizeof(Chassis_Upload_Data_s));
+#endif // ONE_BOARD
 }
 
-#define LF_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define RF_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE - CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define LB_CENTER ((HALF_TRACK_WIDTH + CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-#define RB_CENTER ((HALF_TRACK_WIDTH - CENTER_GIMBAL_OFFSET_X + HALF_WHEEL_BASE + CENTER_GIMBAL_OFFSET_Y) * DEGREE_2_RAD)
-/**
- * @brief 计算每个轮毂电机的输出,正运动学解算
- *        用宏进行预替换减小开销,运动解算具体过程参考教程
- */
-static void MecanumCalculate()
-{
-    vt_lf = -chassis_vx - chassis_vy - chassis_cmd_recv.wz * LF_CENTER;
-    vt_rf = -chassis_vx + chassis_vy - chassis_cmd_recv.wz * RF_CENTER;
-    vt_lb = chassis_vx - chassis_vy - chassis_cmd_recv.wz * LB_CENTER;
-    vt_rb = chassis_vx + chassis_vy - chassis_cmd_recv.wz * RB_CENTER;
-}
-
-/**
- * @brief 根据裁判系统和电容剩余容量对输出进行限制并设置电机参考值
- *
- */
-static void LimitChassisOutput()
-{
-    // 功率限制待添加
-    // referee_data->PowerHeatData.chassis_power;
-    // referee_data->PowerHeatData.chassis_power_buffer;
-
-    // 完成功率限制后进行电机参考输入设定
-    DJIMotorSetRef(motor_lf, vt_lf);
-    DJIMotorSetRef(motor_rf, vt_rf);
-    DJIMotorSetRef(motor_lb, vt_lb);
-    DJIMotorSetRef(motor_rb, vt_rb);
-}
-
-/**
- * @brief 根据每个轮子的速度反馈,计算底盘的实际运动速度,逆运动解算
- *        对于双板的情况,考虑增加来自底盘板IMU的数据
- *
- */
-static void EstimateSpeed()
-{
-    // 根据电机速度和陀螺仪的角速度进行解算,还可以利用加速度计判断是否打滑(如果有)
-    // chassis_feedback_data.vx vy wz =
-    //  ...
-}
 
 /* 机器人底盘控制核心任务 */
 void ChassisTask()
 {
-
-    // 后续增加没收到消息的处理(双板的情况)
     // 获取新的控制信息
-// #ifdef ONE_BOARD
-//     SubGetMessage(chassis_sub, &chassis_cmd_recv);
-// #endif
-// #ifdef CHASSIS_BOARD
-//     chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
-// #endif // CHASSIS_BOARD
+    // static float last_cmd_time = DWT_GetTimeline_ms(); // 初始化避免上电即超时
+    // static uint8_t cmd_timeout_flag = 0;
+    // float now = DWT_GetTimeline_ms();
 
-//     SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);//设置功率限制
-//     if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE)
-//     { // 如果出现重要模块离线或遥控器设置为急停,让电机停止
-//         DJIMotorStop(motor_lf);
-//         DJIMotorStop(motor_rf);
-//         DJIMotorStop(motor_lb);
-//         DJIMotorStop(motor_rb);
-//     }
-//     else
-//     { // 正常工作
-//         DJIMotorEnable(motor_lf);
-//         DJIMotorEnable(motor_rf);
-//         DJIMotorEnable(motor_lb);
-//         DJIMotorEnable(motor_rb);
-//     }
+#ifdef ONE_BOARD
+    if (SubGetMessage(chassis_sub, &chassis_cmd_recv)) {
+        last_cmd_time = now;
+        if (cmd_timeout_flag) {
+            cmd_timeout_flag = 0;
+            LOGINFO("[CHASSIS] Communication restored");
+        }
+    }
+#endif
+#ifdef CHASSIS_BOARD
+    if (CANCommIsOnline(chasiss_can_comm)) {
+        chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
+        last_cmd_time = now;
+        if (cmd_timeout_flag) {
+            cmd_timeout_flag = 0;
+            LOGINFO("[CHASSIS] CAN communication restored");
+        }
+    }
+#endif // CHASSIS_BOARD
 
-//     // 根据控制模式设定旋转速度
-//     switch (chassis_cmd_recv.chassis_mode)
-//     {
-//     case CHASSIS_NO_FOLLOW: // 底盘不旋转,但维持全向机动,一般用于调整云台姿态
-//         chassis_cmd_recv.wz = 0;
-//         break;
-//     case CHASSIS_FOLLOW_GIMBAL_YAW: // 跟随云台,不单独设置pid,以误差角度平方为速度输出
-//         chassis_cmd_recv.wz = -1.5f * chassis_cmd_recv.offset_angle * abs(chassis_cmd_recv.offset_angle);
-//         break;
-//     case CHASSIS_ROTATE: // 自旋,同时保持全向机动;当前wz维持定值,后续增加不规则的变速策略
-//         chassis_cmd_recv.wz = 4000;
-//         break;
-//     default:
-//         break;
-//     }
+    // /* 控制指令超时检测 */
+    // if (cmd_timeout_flag == 0 && (now - last_cmd_time) > 500.0f) {
+    //     LOGERROR("[CHASSIS] Control command timeout (>500ms), emergency stop!");
+    //     cmd_timeout_flag = 1;
+    //     InverseKinematics_EmergencyStop();
+    //     // 停止所有电机
+    //     DJIMotorStop(motor_ctx.steer_left);
+    //     DJIMotorStop(motor_ctx.steer_right);
+    //     LK7015Stop(motor_ctx.drive_left);
+    //     LK7015Stop(motor_ctx.drive_right);
+    // }
 
-    // 根据云台和底盘的角度offset将控制量映射到底盘坐标系上
-    // 底盘逆时针旋转为角度正方向;云台命令的方向以云台指向的方向为x,采用右手系(x指向正北时y在正东)
-    // static float sin_theta, cos_theta;
-    // cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    // sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    // chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
-    // chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
+    // if (cmd_timeout_flag) {
+    //     return;  // 超时状态下不执行控制逻辑
+    // }
 
-    // 根据控制模式进行正运动学解算,计算底盘输出
-    // MecanumCalculate();
+    if(zero_angle_done==0){
+        static uint8_t zero_error_reported = 0;
+        zero_angle_done=ZeroAngleProcess(zero_angle_l, zero_angle_r);
+        // 检查是否有舵机进入 ERROR 状态
+        if ((zero_angle_l != NULL && zero_angle_l->state == ZEROANGLE_STATE_ERROR) ||
+            (zero_angle_r != NULL && zero_angle_r->state == ZEROANGLE_STATE_ERROR)) {
+            if (!zero_error_reported) {
+                zero_error_reported = 1;
+                LOGERROR("[CHASSIS] Zero angle calibration ERROR!");
+            }
+            InverseKinematics_EmergencyStop();
+            DJIMotorStop(motor_ctx.steer_left);
+            DJIMotorStop(motor_ctx.steer_right);
+            LK7015Stop(motor_ctx.drive_left);
+            LK7015Stop(motor_ctx.drive_right);
+            return;
+        }
+        if(zero_angle_done)
+            InverseKinematics_UpdateZeroAngle();
+    }
+    InverseKinematics_ComputePhysicalAngle();
+    // 云台坐标系->底盘坐标系变换: 底盘逆时针为正
+    // 使用 offset_angle 进行旋转矩阵计算
+    static float sin_theta, cos_theta;
+    cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
+    sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
+    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
+    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
+    chassis_wz = chassis_cmd_recv.wz;
 
-    // 根据裁判系统的反馈数据和电容数据对输出限幅并设定闭环参考值
-    // LimitChassisOutput();
+    // 直接使用档位值（robot_cmd.c 侧输出 [-10, 10] 档位）
+    int8_t vx_level = (int8_t)(chassis_vx);
+    int8_t vy_level = (int8_t)(chassis_vy);
+    int8_t wz_level = (int8_t)(chassis_wz);
 
-    // 根据电机的反馈速度和IMU(如果有)计算真实速度
-    // EstimateSpeed();
+    InverseKinematics_Drive(vx_level, vy_level, wz_level);
 
-    // // 获取裁判系统数据   建议将裁判系统与底盘分离，所以此处数据应使用消息中心发送
-    // // 我方颜色id小于7是红色,大于7是蓝色,注意这里发送的是对方的颜色, 0:blue , 1:red
-    // chassis_feedback_data.enemy_color = referee_data->GameRobotState.robot_id > 7 ? 1 : 0;
-    // // 当前只做了17mm热量的数据获取,后续根据robot_def中的宏切换双枪管和英雄42mm的情况
-    // chassis_feedback_data.bullet_speed = referee_data->GameRobotState.shooter_id1_17mm_speed_limit;
-    // chassis_feedback_data.rest_heat = referee_data->PowerHeatData.shooter_heat0;
+    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);
 
     // 推送反馈消息
-// #ifdef ONE_BOARD
-//     PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
-// #endif
-// #ifdef CHASSIS_BOARD
-//     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
-// #endif // CHASSIS_BOARD
+#ifdef ONE_BOARD
+    PubPushMessage(chassis_pub, (void *)&chassis_feedback_data);
+#endif
+#ifdef CHASSIS_BOARD
+    CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
+#endif // CHASSIS_BOARD
 }
+

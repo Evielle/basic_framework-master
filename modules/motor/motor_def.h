@@ -13,6 +13,7 @@
 #define MOTOR_DEF_H
 
 #include "controller.h"
+#include "bsp_can.h"
 #include "stdint.h"
 
 #define LIMIT_MIN_MAX(x, min, max) (x) = (((x) <= (min)) ? (min) : (((x) >= (max)) ? (max) : (x)))
@@ -105,6 +106,7 @@ typedef enum
     M3508,
     M2006,
     LK9025,
+    LK7015,
     HT04,
 } Motor_Type_e;
 

@@ -22,18 +22,18 @@ project(basic_framework C ASM)
 set(CMAKE_BUILD_TYPE Debug) # Debug Release RelWithDebInfo MinSizeRel
 
 # board specific settings, arch/fpu/instruction
-set(MCU_FLAGS -mcpu=cortex-m4 -mthumb -mthumb-interwork -mfloat-abi=hard -mfpu=fpv4-sp-d16)
+set(MCU_FLAGS -mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16)
 set(LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/STM32F407IGHx_FLASH.ld") # 指定链接脚本
 set(DSP_NAME "libCMSISDSP.a") # 指定DSP库名称
 link_directories(${CMAKE_SOURCE_DIR}/Middlewares/ST/ARM/DSP/Lib)
 
 # Generic compiler settings for optimization and basic link lib
-add_compile_options(-pipe ${MCU_FLAGS} -Wall -Werror -fmessage-length=0 # basic options
+add_compile_options(-pipe ${MCU_FLAGS} -fmessage-length=0 # basic options
                     -ffunction-sections -fdata-sections -fno-common # optimize options 
                     )
 add_link_options(-pipe ${MCU_FLAGS} -T${LINKER_SCRIPT} -Wl,--no-warn-rwx-segments # close RWX warning
-                 -lm -lc -lnosys # lib options
-                 -Wl,--gc-sections -flto -specs=nano.specs -specs=nosys.specs # optimize options
+                 -lm -lc  # lib options
+                 -Wl,--gc-sections -flto # optimize options
                  -Wl,-Map=${PROJECT_BINARY_DIR}/${PROJECT_NAME}.map -Wl,--cref -Wl,--print-memory-usage # map options
                  ) # if your executable is too large , try option '-s' to strip symbols
 

@@ -68,7 +68,15 @@ Makefile
 *.svd
 *.ld
 
+# Ninja build files
+build.ninja
+.ninja_deps
+.ninja_log
+
 # Project files
 .mxproject
 .settings/
 .stm32env
+
+# Reference framework
+references/

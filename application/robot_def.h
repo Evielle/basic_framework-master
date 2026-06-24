@@ -18,8 +18,8 @@
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 // #define ONE_BOARD // 单板控制整车
-#define CHASSIS_BOARD //底盘板
-// #define GIMBAL_BOARD  //云台板
+// #define CHASSIS_BOARD //底盘板
+#define GIMBAL_BOARD  //云台板
 
 #define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 // #define VISION_USE_UART // 使用串口发送视觉数据
@@ -94,9 +94,9 @@ typedef enum
 // 云台模式设置
 typedef enum
 {
-    GIMBAL_ZERO_FORCE = 0, // 电流零输入
-    GIMBAL_FREE_MODE,      // 云台自由运动模式,即与底盘分离(底盘此时应为NO_FOLLOW)反馈值为电机total_angle;似乎可以改为全部用IMU数据?
-    GIMBAL_GYRO_MODE,      // 云台陀螺仪反馈模式,反馈值为陀螺仪pitch,total_yaw_angle,底盘可以为小陀螺和跟随模式
+    GIMBAL_ZERO_FORCE = 0,
+    GIMBAL_FREE_MODE,
+    GIMBAL_GYRO_MODE,
 } gimbal_mode_e;
 
 // 发射模式设置
@@ -156,11 +156,9 @@ typedef struct
 
 // cmd发布的云台控制数据,由gimbal订阅
 typedef struct
-{ // 云台角度控制
+{
     float yaw;
     float pitch;
-    float chassis_rotate_wz;
-
     gimbal_mode_e gimbal_mode;
 } Gimbal_Ctrl_Cmd_s;
 
@@ -205,8 +203,7 @@ typedef struct
 
 typedef struct
 {
-    attitude_t gimbal_imu_data;
-    uint16_t yaw_motor_single_round_angle;
+    float pitch_down_angle;
 } Gimbal_Upload_Data_s;
 
 typedef struct

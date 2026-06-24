@@ -3,19 +3,11 @@
 #include "robot_cmd.h"
 // module
 #include "imageRoad.h"
-#include "ins_task.h"
 #include "message_center.h"
-#include "general_def.h"
-#include "dji_motor.h"
-#include "bmi088.h"
 #include "Vofa.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
-
-// 私有宏,自动将编码器转换成角度值
-#define YAW_ALIGN_ANGLE (YAW_CHASSIS_ALIGN_ECD * ECD_ANGLE_COEF_DJI) // 对齐时的角度,0-360
-#define PTICH_HORIZON_ANGLE (PITCH_HORIZON_ECD * ECD_ANGLE_COEF_DJI) // pitch水平时电机的角度,0-360
 
 /* cmd应用包含的模块实例指针和交互信息存储*/
 #ifdef GIMBAL_BOARD // 对双板的兼容,条件编译
@@ -43,9 +35,6 @@ static Shoot_Ctrl_Cmd_s shoot_cmd_send;      // 传递给发射的控制信息
 static Shoot_Upload_Data_s shoot_fetch_data; // 从发射获取的反馈信息
 
 static Robot_Status_e robot_state; // 机器人整体工作状态
-
-BMI088Instance *bmi088_test; // 云台IMU
-BMI088_Data_t bmi088_data;
 
 #ifdef GIMBAL_BOARD
 static Vofa_HandleTypedef vofa_handle;
@@ -81,32 +70,6 @@ void RobotCMDInit()
     gimbal_cmd_send.pitch = 0;
 
     robot_state = ROBOT_READY;
-}
-
-/**
- * @brief 根据gimbal app传回的当前电机角度计算和零位的误差
- *        单圈绝对角度的范围是0~360,说明文档中有图示
- *
- */
-static void CalcOffsetAngle()
-{
-    static float angle;
-    angle = gimbal_fetch_data.yaw_motor_single_round_angle; // 从云台获取的当前yaw电机单圈角度
-#if YAW_ECD_GREATER_THAN_4096                               // 如果大于180度
-    if (angle > YAW_ALIGN_ANGLE && angle <= 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle > 180.0f + YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE - 360.0f;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-#else // 小于180度
-    if (angle > YAW_ALIGN_ANGLE)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else if (angle <= YAW_ALIGN_ANGLE && angle >= YAW_ALIGN_ANGLE - 180.0f)
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE;
-    else
-        chassis_cmd_send.offset_angle = angle - YAW_ALIGN_ANGLE + 360.0f;
-#endif
 }
 
 /**
@@ -199,15 +162,9 @@ void RobotCMDTask()
         CmdEmergencyStop();
     }
 
-    // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
-    CalcOffsetAngle();
     // 图传控制
     if (ImageRoadIsOnline())
         ImageRoadRcSet();
-
-// 将云台姿态数据传递给底盘
-    chassis_cmd_send.gimbal_yaw_angle = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
-    chassis_cmd_send.gimbal_wz = gimbal_fetch_data.gimbal_imu_data.Gyro[2];
 
 #if defined(ONE_BOARD)
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);

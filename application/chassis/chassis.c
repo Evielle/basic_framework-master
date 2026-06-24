@@ -95,16 +95,16 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan2,
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.8,
-                .Ki = 0.2,
+                .Kp = 0,
+                .Ki = 1,
                 .Kd = 0,
                 .IntegralLimit = 6000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 16384,
             },
             .speed_PID = {
-                .Kp = 0.8,
-                .Ki = 0.1,
+                .Kp = 0,
+                .Ki = 1,
                 .Kd = 0,
                 .IntegralLimit = 2000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
@@ -131,8 +131,8 @@ void ChassisInit()
     .can_init_config.can_handle = &hcan2,
     .controller_param_init_config = {
         .speed_PID = {
-            .Kp = 2.2,
-            .Ki = 1.2,
+            .Kp = 0,
+            .Ki = 1,
             .Kd = 0,
             .IntegralLimit = 2000,
             .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
@@ -198,50 +198,22 @@ void ChassisTask()
 
 #ifdef ONE_BOARD
     if (SubGetMessage(chassis_sub, &chassis_cmd_recv)) {
-        last_cmd_time = now;
-        if (cmd_timeout_flag) {
-            cmd_timeout_flag = 0;
+        // last_cmd_time = now;
+        // if (cmd_timeout_flag) {
+        //     cmd_timeout_flag = 0;
             LOGINFO("[CHASSIS] Communication restored");
-        }
+        // }
     }
 #endif
 #ifdef CHASSIS_BOARD
-    if (CANCommIsOnline(chasiss_can_comm)) {
-        chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
-        last_cmd_time = now;
-        if (cmd_timeout_flag) {
-            cmd_timeout_flag = 0;
-            LOGINFO("[CHASSIS] CAN communication restored");
-        }
-    }
+    chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
 
-    // /* 控制指令超时检测 */
-    // if (cmd_timeout_flag == 0 && (now - last_cmd_time) > 500.0f) {
-    //     LOGERROR("[CHASSIS] Control command timeout (>500ms), emergency stop!");
-    //     cmd_timeout_flag = 1;
-    //     InverseKinematics_EmergencyStop();
-    //     // 停止所有电机
-    //     DJIMotorStop(motor_ctx.steer_left);
-    //     DJIMotorStop(motor_ctx.steer_right);
-    //     LK7015Stop(motor_ctx.drive_left);
-    //     LK7015Stop(motor_ctx.drive_right);
-    // }
-
-    // if (cmd_timeout_flag) {
-    //     return;  // 超时状态下不执行控制逻辑
-    // }
-
     if(zero_angle_done==0){
-        static uint8_t zero_error_reported = 0;
         zero_angle_done=ZeroAngleProcess(zero_angle_l, zero_angle_r);
         // 检查是否有舵机进入 ERROR 状态
         if ((zero_angle_l != NULL && zero_angle_l->state == ZEROANGLE_STATE_ERROR) ||
             (zero_angle_r != NULL && zero_angle_r->state == ZEROANGLE_STATE_ERROR)) {
-            if (!zero_error_reported) {
-                zero_error_reported = 1;
-                LOGERROR("[CHASSIS] Zero angle calibration ERROR!");
-            }
             InverseKinematics_EmergencyStop();
             DJIMotorStop(motor_ctx.steer_left);
             DJIMotorStop(motor_ctx.steer_right);
@@ -252,6 +224,7 @@ void ChassisTask()
         if(zero_angle_done)
             InverseKinematics_UpdateZeroAngle();
     }
+#if 0
     InverseKinematics_ComputePhysicalAngle();
     // 云台坐标系->底盘坐标系变换: 底盘逆时针为正
     // 使用 offset_angle 进行旋转矩阵计算
@@ -277,6 +250,7 @@ void ChassisTask()
 #endif
 #ifdef CHASSIS_BOARD
     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
+#endif
 #endif // CHASSIS_BOARD
 }
 

@@ -8,6 +8,7 @@
 #include "general_def.h"
 #include "dji_motor.h"
 #include "bmi088.h"
+#include "Vofa.h"
 // bsp
 #include "bsp_dwt.h"
 #include "bsp_log.h"
@@ -45,6 +46,12 @@ static Robot_Status_e robot_state; // 机器人整体工作状态
 
 BMI088Instance *bmi088_test; // 云台IMU
 BMI088_Data_t bmi088_data;
+
+#ifdef GIMBAL_BOARD
+static Vofa_HandleTypedef vofa_handle;
+static float vofa_data[4];
+#endif
+
 void RobotCMDInit()
 {
     imageRoad_rc = ImageRoadTaskInit(&huart1); // 图传链路初始化,根据实际硬件修改串口号
@@ -69,10 +76,11 @@ void RobotCMDInit()
         .send_data_len = sizeof(Chassis_Ctrl_Cmd_s),
     };
     cmd_can_comm = CANCommInit(&comm_conf);
-#endif // GIMBAL_BOARD
+    Vofa_Init(&vofa_handle, VOFA_MODE_SKIP);
+#endif
     gimbal_cmd_send.pitch = 0;
 
-    robot_state = ROBOT_READY; // 启动时机器人进入工作模式,后续加入所有应用初始化完成之后再进入
+    robot_state = ROBOT_READY;
 }
 
 /**
@@ -124,8 +132,8 @@ static void ImageRoadRcSet()
 
     // mode_sw == 1: 正常控制
     // 左摇杆 → 底盘 (rocker_l_ = ch_2, rocker_l1 = ch_3)
-    chassis_cmd_send.vx = (float)imageRoad_rc[TEMP].rc.rocker_l_ / 66.0f;
-    chassis_cmd_send.vy = (float)imageRoad_rc[TEMP].rc.rocker_l1 / 66.0f;
+    chassis_cmd_send.vx = (float)imageRoad_rc[TEMP].rc.rocker_l_ * 3000.0f / 660.0f;
+    chassis_cmd_send.vy = (float)imageRoad_rc[TEMP].rc.rocker_l1 * 3000.0f / 660.0f;
 
     // 右摇杆 → 云台 (rocker_r_ = ch_0, rocker_r1 = ch_1)
     gimbal_cmd_send.yaw += 0.005f * (float)imageRoad_rc[TEMP].rc.rocker_r_;
@@ -142,6 +150,16 @@ static void ImageRoadRcSet()
         chassis_cmd_send.chassis_mode = CHASSIS_FOLLOW_GIMBAL_YAW;
 
     gimbal_cmd_send.gimbal_mode = GIMBAL_GYRO_MODE;
+}
+
+static void CmdEmergencyStop(void)
+{
+    robot_state = ROBOT_STOP;
+    gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
+    chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
+    shoot_cmd_send.shoot_mode = SHOOT_OFF;
+    shoot_cmd_send.friction_mode = FRICTION_OFF;
+    shoot_cmd_send.load_mode = LOAD_STOP;
 }
 
 /* 机器人核心控制任务,200Hz频率运行(必须高于视觉发送频率) */
@@ -163,12 +181,7 @@ void RobotCMDTask()
         chassis_fetch_data = *(Chassis_Upload_Data_s *)CANCommGet(cmd_can_comm);
     } else {
         chassis_miss_count++;
-        robot_state = ROBOT_STOP;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-        shoot_cmd_send.shoot_mode = SHOOT_OFF;
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        shoot_cmd_send.load_mode = LOAD_STOP;
+        CmdEmergencyStop();
         LOGERROR("[CMD] CANComm offline, emergency stop!");
     }
 #endif // GIMBAL_BOARD
@@ -183,12 +196,7 @@ void RobotCMDTask()
     /* 如果连续100次(500ms)未收到消息，触发急停 */
     if (gimbal_miss_count > 100 || chassis_miss_count > 100) {
         LOGERROR("[CMD] Message timeout, triggering emergency stop!");
-        robot_state = ROBOT_STOP;
-        gimbal_cmd_send.gimbal_mode = GIMBAL_ZERO_FORCE;
-        chassis_cmd_send.chassis_mode = CHASSIS_ZERO_FORCE;
-        shoot_cmd_send.shoot_mode = SHOOT_OFF;
-        shoot_cmd_send.friction_mode = FRICTION_OFF;
-        shoot_cmd_send.load_mode = LOAD_STOP;
+        CmdEmergencyStop();
     }
 
     // 根据gimbal的反馈值计算云台和底盘正方向的夹角,不需要传参,通过static私有变量完成
@@ -201,12 +209,17 @@ void RobotCMDTask()
     chassis_cmd_send.gimbal_yaw_angle = gimbal_fetch_data.gimbal_imu_data.YawTotalAngle;
     chassis_cmd_send.gimbal_wz = gimbal_fetch_data.gimbal_imu_data.Gyro[2];
 
-#ifdef ONE_BOARD
+#if defined(ONE_BOARD)
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
-#endif // ONE_BOARD
-#ifdef GIMBAL_BOARD
+#elif defined(GIMBAL_BOARD)
     CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
-#endif // GIMBAL_BOARD
+    vofa_data[0] = (float)chassis_fetch_data.steer_calib_left;
+    vofa_data[1] = (float)chassis_fetch_data.steer_calib_right;
+    vofa_data[2] = 0;
+    vofa_data[3] = 0;
+    Vofa_JustFloat(&vofa_handle, vofa_data, 4);
+#endif
+
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);
     PubPushMessage(gimbal_cmd_pub, (void *)&gimbal_cmd_send);
 }

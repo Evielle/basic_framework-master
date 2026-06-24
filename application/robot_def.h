@@ -18,8 +18,8 @@
 
 /* 开发板类型定义,烧录时注意不要弄错对应功能;修改定义后需要重新编译,只能存在一个定义! */
 // #define ONE_BOARD // 单板控制整车
-// #define CHASSIS_BOARD //底盘板
-#define GIMBAL_BOARD  //云台板
+#define CHASSIS_BOARD //底盘板
+// #define GIMBAL_BOARD  //云台板
 
 #define VISION_USE_VCP  // 使用虚拟串口发送视觉数据
 // #define VISION_USE_UART // 使用串口发送视觉数据
@@ -195,6 +195,8 @@ typedef struct
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
+    uint8_t steer_calib_left;    // 左舵校准状态: 0=未校准, 1=完成
+    uint8_t steer_calib_right;   // 右舵校准状态: 0=未校准, 2=完成
 
 } Chassis_Upload_Data_s;
 

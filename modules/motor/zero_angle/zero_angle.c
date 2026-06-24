@@ -6,13 +6,14 @@
 extern void DJIMotorSetRef(DJIMotorInstance *motor, float ref);
 extern void DJIMotorStop(DJIMotorInstance *motor);
 
-ZeroAngleInstance *ZeroAngleInit(uint16_t GPIO_Pin, DJIMotorInstance *motor)
+ZeroAngleInstance *ZeroAngleInit(uint16_t GPIO_Pin, DJIMotorInstance *motor, int8_t direction)
 {
     ZeroAngleInstance *inst = (ZeroAngleInstance *)malloc(sizeof(ZeroAngleInstance));
     if (inst == NULL) return NULL;
 
     memset(inst, 0, sizeof(ZeroAngleInstance));
     inst->motor = motor;
+    inst->direction = direction;
 
     GPIO_Init_Config_s gpio_cfg = {
         .GPIO_Pin    = GPIO_Pin,
@@ -40,7 +41,7 @@ static void ZeroAngleProcessSingle(ZeroAngleInstance *inst)
     switch (inst->state) {
     case ZEROANGLE_STATE_IDLE:
         DJIMotorOuterLoop(inst->motor, SPEED_LOOP);
-        DJIMotorSetRef(inst->motor, FIND_ZERO_SPEED);
+        DJIMotorSetRef(inst->motor, FIND_ZERO_SPEED * inst->direction);
         inst->state = ZEROANGLE_STATE_RUNNING;
         inst->debounce_cnt = 0;
         break;
@@ -58,9 +59,11 @@ static void ZeroAngleProcessSingle(ZeroAngleInstance *inst)
 
         if (inst->debounce_cnt >= DEBOUNCE_THRESHOLD &&
             inst->new_state != inst->old_state) {
-            inst->zero_angle = inst->motor->measure.total_angle;
-            DJIMotorSetRef(inst->motor, 0.0f);
-            inst->state = ZEROANGLE_STATE_DONE;
+            if (inst->new_state == 1) {
+                inst->zero_angle = inst->motor->measure.total_angle;
+                DJIMotorSetRef(inst->motor, 0.0f);
+                inst->state = ZEROANGLE_STATE_DONE;
+            }
             inst->old_state = inst->new_state;
             inst->debounce_cnt = 0;
         }

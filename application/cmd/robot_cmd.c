@@ -49,7 +49,7 @@ BMI088_Data_t bmi088_data;
 
 #ifdef GIMBAL_BOARD
 static Vofa_HandleTypedef vofa_handle;
-static float vofa_data[4];
+static float vofa_data[3];
 #endif
 
 void RobotCMDInit()
@@ -213,11 +213,10 @@ void RobotCMDTask()
     PubPushMessage(chassis_cmd_pub, (void *)&chassis_cmd_send);
 #elif defined(GIMBAL_BOARD)
     CANCommSend(cmd_can_comm, (void *)&chassis_cmd_send);
-    vofa_data[0] = (float)chassis_fetch_data.steer_calib_left;
-    vofa_data[1] = (float)chassis_fetch_data.steer_calib_right;
-    vofa_data[2] = 0;
-    vofa_data[3] = 0;
-    Vofa_JustFloat(&vofa_handle, vofa_data, 4);
+    vofa_data[0] = chassis_fetch_data.steer_left_ref;
+    vofa_data[1] = chassis_fetch_data.steer_left_meas;
+    vofa_data[2] = chassis_fetch_data.steer_left_out;
+    Vofa_JustFloat(&vofa_handle, vofa_data, 3);
 #endif
 
     PubPushMessage(shoot_cmd_pub, (void *)&shoot_cmd_send);

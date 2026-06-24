@@ -195,8 +195,10 @@ typedef struct
     uint8_t rest_heat;           // 剩余枪口热量
     Bullet_Speed_e bullet_speed; // 弹速限制
     Enemy_Color_e enemy_color;   // 0 for blue, 1 for red
-    uint8_t steer_calib_left;    // 左舵校准状态: 0=未校准, 1=完成
-    uint8_t steer_calib_right;   // 右舵校准状态: 0=未校准, 2=完成
+
+    float steer_left_ref;        // 左舵角度参考值
+    float steer_left_meas;       // 左舵角度测量值
+    float steer_left_out;        // 左舵输出值(实际电流)
 
 } Chassis_Upload_Data_s;
 

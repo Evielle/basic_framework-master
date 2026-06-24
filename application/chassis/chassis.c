@@ -95,16 +95,16 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan2,
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 1,
-                .Ki = 1,
+                .Kp = 130,
+                .Ki = 10,
                 .Kd = 0,
-                .IntegralLimit = 6000,
+                .IntegralLimit = 4000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 16384,
             },
             .speed_PID = {
-                .Kp = 0.7,
-                .Ki = 0.5,
+                .Kp = 2,
+                .Ki = 1,
                 .Kd = 0,
                 .IntegralLimit = 4000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
@@ -131,8 +131,8 @@ void ChassisInit()
     .can_init_config.can_handle = &hcan2,
     .controller_param_init_config = {
         .speed_PID = {
-            .Kp = 0.7,
-            .Ki = 0.5,
+            .Kp = 25,
+            .Ki = 0,
             .Kd = 0,
             .IntegralLimit = 5000,
             .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
@@ -153,8 +153,8 @@ void ChassisInit()
     motor_lk9025_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_r_lk = LK7015Init(&motor_lk9025_config);  // 右驱, CAN ID=2
 
-    zero_angle_l=ZeroAngleInit(LightGateL_Pin,motor_l);
-    zero_angle_r=ZeroAngleInit(LightGateR_Pin,motor_r);
+    zero_angle_l=ZeroAngleInit(LightGateL_Pin,motor_l, 1);   // 左: 顺时针
+    zero_angle_r=ZeroAngleInit(LightGateR_Pin,motor_r, -1);  // 右: 逆时针
     
     motor_ctx.steer_left  = motor_l;
     motor_ctx.steer_right = motor_r;
@@ -241,13 +241,29 @@ void ChassisTask()
             int8_t vy_level = (int8_t)(chassis_vy / 300.0f);
             int8_t wz_level = (int8_t)(chassis_wz / 300.0f);
 
+            /* 8-way direction snapping */
+            if (vx_level != 0 || vy_level != 0) {
+                float angle = atan2f((float)vy_level, (float)vx_level);
+                int octant = (int)(roundf(angle / (PI / 4.0f)));
+                if (octant < 0) octant += 8;
+                else octant %= 8;
+                int8_t speed = (int8_t)(fmaxf(fabsf(vx_level), fabsf(vy_level)));
+                static const int8_t dir[8][2] = {
+                    { 1,  0}, { 1,  1}, { 0,  1}, {-1,  1},
+                    {-1,  0}, {-1, -1}, { 0, -1}, { 1, -1},
+                };
+                vx_level = dir[octant][0] * speed;
+                vy_level = dir[octant][1] * speed;
+            }
+
             InverseKinematics_Drive(vx_level, vy_level, wz_level);
         }
     }
 
-    /* 填充校准状态到反馈 */
-    chassis_feedback_data.steer_calib_left  = (zero_angle_l && zero_angle_l->state == ZEROANGLE_STATE_DONE) ? 1 : 0;
-    chassis_feedback_data.steer_calib_right = (zero_angle_r && zero_angle_r->state == ZEROANGLE_STATE_DONE) ? 2 : 0;
+    /* 填充电机监控数据到反馈 */
+    chassis_feedback_data.steer_left_ref  = motor_ctx.steer_left->motor_controller.angle_PID.Ref;
+    chassis_feedback_data.steer_left_meas = motor_ctx.steer_left->motor_controller.angle_PID.Measure;
+    chassis_feedback_data.steer_left_out  = motor_ctx.steer_left->motor_controller.angle_PID.Output;
 
     // 推送反馈消息
 #ifdef ONE_BOARD

@@ -20,8 +20,8 @@
 #include "zero_angle.h"
 
 /* 速度档位对应的实际最大速度 (m/s 和 rad/s) */
-#define MAX_LINEAR_SPEED_X   0.25f
-#define MAX_LINEAR_SPEED_Y   0.25f
+#define MAX_LINEAR_SPEED_X   1.0f
+#define MAX_LINEAR_SPEED_Y   1.0f
 #define MAX_ANGULAR_SPEED_Z  0.5f
 
 /* 舵轮对角布局坐标 (m)，由 robot_def.h 的 WHEEL_BASE/TRACK_WIDTH 计算 */

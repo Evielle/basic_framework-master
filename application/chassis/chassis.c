@@ -95,20 +95,20 @@ void ChassisInit()
         .can_init_config.can_handle = &hcan2,
         .controller_param_init_config = {
             .angle_PID = {
-                .Kp = 0.8,
-                .Ki = 0.2,
+                .Kp = 130,
+                .Ki = 10,
                 .Kd = 0,
-                .IntegralLimit = 6000,
+                .IntegralLimit = 4000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
                 .MaxOut = 16384,
             },
             .speed_PID = {
-                .Kp = 0.8,
-                .Ki = 0.1,
+                .Kp = 2,
+                .Ki = 1,
                 .Kd = 0,
-                .IntegralLimit = 2000,
+                .IntegralLimit = 4000,
                 .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement,
-                .MaxOut = 3500,
+                .MaxOut = 5000,
             },
             .other_angle_feedback_ptr = NULL,
         },
@@ -131,10 +131,10 @@ void ChassisInit()
     .can_init_config.can_handle = &hcan2,
     .controller_param_init_config = {
         .speed_PID = {
-            .Kp = 2.2,
-            .Ki = 1.2,
+            .Kp = 25,
+            .Ki = 0,
             .Kd = 0,
-            .IntegralLimit = 2000,
+            .IntegralLimit = 5000,
             .Improve = PID_Trapezoid_Intergral | PID_Integral_Limit | PID_Derivative_On_Measurement | PID_OutputFilter,
             .MaxOut = 8000,
             },
@@ -153,8 +153,8 @@ void ChassisInit()
     motor_lk9025_config.controller_setting_init_config.motor_reverse_flag = MOTOR_DIRECTION_NORMAL;
     motor_r_lk = LK7015Init(&motor_lk9025_config);  // 右驱, CAN ID=2
 
-    zero_angle_l=ZeroAngleInit(LightGateL_Pin,motor_l);
-    zero_angle_r=ZeroAngleInit(LightGateR_Pin,motor_r);
+    zero_angle_l=ZeroAngleInit(LightGateL_Pin,motor_l, 1);   // 左: 顺时针
+    zero_angle_r=ZeroAngleInit(LightGateR_Pin,motor_r, -1);  // 右: 逆时针
     
     motor_ctx.steer_left  = motor_l;
     motor_ctx.steer_right = motor_r;
@@ -198,78 +198,72 @@ void ChassisTask()
 
 #ifdef ONE_BOARD
     if (SubGetMessage(chassis_sub, &chassis_cmd_recv)) {
-        last_cmd_time = now;
-        if (cmd_timeout_flag) {
-            cmd_timeout_flag = 0;
+        // last_cmd_time = now;
+        // if (cmd_timeout_flag) {
+        //     cmd_timeout_flag = 0;
             LOGINFO("[CHASSIS] Communication restored");
-        }
+        // }
     }
 #endif
 #ifdef CHASSIS_BOARD
-    if (CANCommIsOnline(chasiss_can_comm)) {
-        chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
-        last_cmd_time = now;
-        if (cmd_timeout_flag) {
-            cmd_timeout_flag = 0;
-            LOGINFO("[CHASSIS] CAN communication restored");
-        }
-    }
+    chassis_cmd_recv = *(Chassis_Ctrl_Cmd_s *)CANCommGet(chasiss_can_comm);
 #endif // CHASSIS_BOARD
+    /* 云台命令处理：零力模式失能所有电机，普通模式使能 + 零点校准 */
+    if (chassis_cmd_recv.chassis_mode == CHASSIS_ZERO_FORCE) {
+        DJIMotorStop(motor_ctx.steer_left);
+        DJIMotorStop(motor_ctx.steer_right);
+        LK7015Stop(motor_ctx.drive_left);
+        LK7015Stop(motor_ctx.drive_right);
+    } else {
+        DJIMotorEnable(motor_ctx.steer_left);
+        DJIMotorEnable(motor_ctx.steer_right);
+        LK7015Enable(motor_ctx.drive_left);
+        LK7015Enable(motor_ctx.drive_right);
 
-    // /* 控制指令超时检测 */
-    // if (cmd_timeout_flag == 0 && (now - last_cmd_time) > 500.0f) {
-    //     LOGERROR("[CHASSIS] Control command timeout (>500ms), emergency stop!");
-    //     cmd_timeout_flag = 1;
-    //     InverseKinematics_EmergencyStop();
-    //     // 停止所有电机
-    //     DJIMotorStop(motor_ctx.steer_left);
-    //     DJIMotorStop(motor_ctx.steer_right);
-    //     LK7015Stop(motor_ctx.drive_left);
-    //     LK7015Stop(motor_ctx.drive_right);
-    // }
+        if (!zero_angle_done) {
+            zero_angle_done = ZeroAngleProcess(zero_angle_l, zero_angle_r);
 
-    // if (cmd_timeout_flag) {
-    //     return;  // 超时状态下不执行控制逻辑
-    // }
-
-    if(zero_angle_done==0){
-        static uint8_t zero_error_reported = 0;
-        zero_angle_done=ZeroAngleProcess(zero_angle_l, zero_angle_r);
-        // 检查是否有舵机进入 ERROR 状态
-        if ((zero_angle_l != NULL && zero_angle_l->state == ZEROANGLE_STATE_ERROR) ||
-            (zero_angle_r != NULL && zero_angle_r->state == ZEROANGLE_STATE_ERROR)) {
-            if (!zero_error_reported) {
-                zero_error_reported = 1;
-                LOGERROR("[CHASSIS] Zero angle calibration ERROR!");
-            }
-            InverseKinematics_EmergencyStop();
-            DJIMotorStop(motor_ctx.steer_left);
-            DJIMotorStop(motor_ctx.steer_right);
-            LK7015Stop(motor_ctx.drive_left);
-            LK7015Stop(motor_ctx.drive_right);
-            return;
+            if (zero_angle_done)
+                InverseKinematics_UpdateZeroAngle();
         }
-        if(zero_angle_done)
-            InverseKinematics_UpdateZeroAngle();
+
+        if (zero_angle_done) {
+            InverseKinematics_ComputePhysicalAngle();
+
+            static float sin_theta, cos_theta;
+            cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
+            sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
+            chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
+            chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
+            chassis_wz = chassis_cmd_recv.wz;
+
+            int8_t vx_level = (int8_t)(chassis_vx / 300.0f);
+            int8_t vy_level = (int8_t)(chassis_vy / 300.0f);
+            int8_t wz_level = (int8_t)(chassis_wz / 300.0f);
+
+            /* 8-way direction snapping */
+            if (vx_level != 0 || vy_level != 0) {
+                float angle = atan2f((float)vy_level, (float)vx_level);
+                int octant = (int)(roundf(angle / (PI / 4.0f)));
+                if (octant < 0) octant += 8;
+                else octant %= 8;
+                int8_t speed = (int8_t)(fmaxf(fabsf(vx_level), fabsf(vy_level)));
+                static const int8_t dir[8][2] = {
+                    { 1,  0}, { 1,  1}, { 0,  1}, {-1,  1},
+                    {-1,  0}, {-1, -1}, { 0, -1}, { 1, -1},
+                };
+                vx_level = dir[octant][0] * speed;
+                vy_level = dir[octant][1] * speed;
+            }
+
+            InverseKinematics_Drive(vx_level, vy_level, wz_level);
+        }
     }
-    InverseKinematics_ComputePhysicalAngle();
-    // 云台坐标系->底盘坐标系变换: 底盘逆时针为正
-    // 使用 offset_angle 进行旋转矩阵计算
-    static float sin_theta, cos_theta;
-    cos_theta = arm_cos_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    sin_theta = arm_sin_f32(chassis_cmd_recv.offset_angle * DEGREE_2_RAD);
-    chassis_vx = chassis_cmd_recv.vx * cos_theta - chassis_cmd_recv.vy * sin_theta;
-    chassis_vy = chassis_cmd_recv.vx * sin_theta + chassis_cmd_recv.vy * cos_theta;
-    chassis_wz = chassis_cmd_recv.wz;
 
-    // 直接使用档位值（robot_cmd.c 侧输出 [-10, 10] 档位）
-    int8_t vx_level = (int8_t)(chassis_vx);
-    int8_t vy_level = (int8_t)(chassis_vy);
-    int8_t wz_level = (int8_t)(chassis_wz);
-
-    InverseKinematics_Drive(vx_level, vy_level, wz_level);
-
-    SetPowerLimit(referee_data->GameRobotState.chassis_power_limit);
+    /* 填充电机监控数据到反馈 */
+    chassis_feedback_data.steer_left_ref  = motor_ctx.steer_left->motor_controller.angle_PID.Ref;
+    chassis_feedback_data.steer_left_meas = motor_ctx.steer_left->motor_controller.angle_PID.Measure;
+    chassis_feedback_data.steer_left_out  = motor_ctx.steer_left->motor_controller.angle_PID.Output;
 
     // 推送反馈消息
 #ifdef ONE_BOARD
@@ -277,6 +271,6 @@ void ChassisTask()
 #endif
 #ifdef CHASSIS_BOARD
     CANCommSend(chasiss_can_comm, (void *)&chassis_feedback_data);
-#endif // CHASSIS_BOARD
+#endif
 }
 

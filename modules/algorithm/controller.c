@@ -206,3 +206,100 @@ float PIDCalculate(PIDInstance *pid, float measure, float ref)
 
     return pid->Output;
 }
+
+/**
+ * @brief          增量式PID计算
+ * @param[in]      PID结构体
+ * @param[in]      测量值
+ * @param[in]      期望值
+ * @retval         返回空
+ */
+float PIDCalculate1(PIDInstance *pid, float measure, float ref)
+{
+    // 堵转检测
+    if (pid->Improve & PID_ErrorHandle)
+        f_PID_ErrorHandle(pid);
+
+    pid->dt = DWT_GetDeltaT(&pid->DWT_CNT); // 获取两次PID计算的时间间隔, 用于积分和微分
+
+    // 保存当前测量值和参考值, 计算当前误差
+    pid->Measure = measure;
+    pid->Ref = ref;
+    pid->Err = pid->Ref - pid->Measure;
+
+    // 如果在死区外, 则计算增量式PID
+    if (abs(pid->Err) > pid->DeadBand)
+    {
+        // 基本的增量式PID计算
+        float deltaP = pid->Kp * (pid->Err - pid->Last_Err);                           // 比例增量
+        float deltaI = pid->Ki * pid->Err * pid->dt;                                   // 积分增量
+        float deltaD = pid->Kd * (pid->Err - 2 * pid->Last_Err + pid->Last_Last_Err) / pid->dt; // 微分增量
+
+        // 总增量
+        float deltaOutput = deltaP + deltaI + deltaD;
+
+        // 更新输出值
+        pid->Output = pid->Last_Output + deltaOutput;
+
+        // 输出滤波
+        if (pid->Improve & PID_OutputFilter)
+            f_Output_Filter(pid);
+
+        // 输出限幅
+        f_Output_Limit(pid);
+    }
+    else // 进入死区, 则保持当前输出
+    {
+        pid->Output = pid->Last_Output;
+    }
+
+    // 保存当前数据, 用于下次计算
+    pid->Last_Last_Err = pid->Last_Err; // 保存前两次误差
+    pid->Last_Err = pid->Err;           // 保存上一次误差
+    pid->Last_Output = pid->Output;     // 保存当前输出
+
+    return pid->Output;
+}
+
+float PID_increment(PIDInstance *PID, float measure, float ref)
+{
+    // 保存上次的测量值和误差,计算当前error
+    PID->Measure = measure;
+    PID->Ref = ref;
+    PID->Err = PID->Ref - PID->Measure;
+    PID->Output +=PID->Kp*(PID->Err-PID->Err1)+PID->Ki*PID->Err+PID->Kd*(PID->Err-2*PID->Err1+PID->Err2);
+//	PID->out+=PID->kp*PID->ek-PID->ki*PID->ek1+PID->kd*PID->ek2;
+    PID->Err2 = PID->Err1;
+    PID->Err1 = PID->Err;
+    f_Output_Limit(PID);
+    return PID->Output;
+}
+
+void PIDReset(PIDInstance *pid)
+{
+    if (!pid)
+        return;
+
+    pid->Measure = 0.0f;
+    pid->Last_Measure = 0.0f;
+    pid->Err = 0.0f;
+    pid->Err1 = 0.0f;
+    pid->Err2 = 0.0f;
+    pid->Last_Err = 0.0f;
+    pid->Last_Last_Err = 0.0f;
+    pid->Last_ITerm = 0.0f;
+
+    pid->Pout = 0.0f;
+    pid->Iout = 0.0f;
+    pid->Dout = 0.0f;
+    pid->ITerm = 0.0f;
+
+    pid->Output = 0.0f;
+    pid->Last_Output = 0.0f;
+    pid->Last_Dout = 0.0f;
+
+    pid->Ref = 0.0f;
+
+    pid->ERRORHandler.ERRORCount = 0;
+    pid->ERRORHandler.ERRORType = PID_ERROR_NONE;
+}

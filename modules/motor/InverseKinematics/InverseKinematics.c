@@ -59,20 +59,6 @@ void InverseKinematics_Init(ChassisMotorContext *ctx)
 }
 
 /**
- * @brief 检查所有电机是否在线
- * @return 1:全部在线  0:有电机离线
- */
-static uint8_t AllMotorsOnline(void)
-{
-    if (motor_ctx == NULL) return 0;
-    if (!DaemonIsOnline(motor_ctx->steer_left->daemon))    return 0;
-    if (!DaemonIsOnline(motor_ctx->steer_right->daemon))    return 0;
-    if (!LK7015IsOnline(motor_ctx->drive_left))        return 0;
-    if (!LK7015IsOnline(motor_ctx->drive_right))        return 0;
-    return 1;
-}
-
-/**
  * @brief 停止所有电机 (内部使用)
  */
 static void StopAllMotors(void)
@@ -187,11 +173,11 @@ uint8_t InverseKinematics_Drive(int8_t vx_level, int8_t vy_level, int8_t wz_leve
     /* 0. 零点未校准则无法保证方向，返回失败 */
     if (!zero_calibrated) return 0;
 
-    /* 1. 在线检测 */
-    if (!AllMotorsOnline()) {
-        StopAllMotors();
-        return 0;
-    }
+    /* 1. 在线检测（调试期间暂时关闭） */
+    // if (!AllMotorsOnline()) {
+    //     StopAllMotors();
+    //     return 0;
+    // }
 
     /* 确保电机全部处于使能状态（堵转保护的电机除外） */
     DJIMotorEnable(motor_ctx->steer_left);
@@ -203,24 +189,7 @@ uint8_t InverseKinematics_Drive(int8_t vx_level, int8_t vy_level, int8_t wz_leve
     float Vx, Vy, Wz;
     LevelToSpeed(vx_level, vy_level, wz_level, &Vx, &Vy, &Wz);
 
-    /* 堵转检测 */
     LK7015Instance *drive_motor[2] = {motor_ctx->drive_left, motor_ctx->drive_right};
-    static float stall_timer[2] = {0.0f, 0.0f};
-    for (int i = 0; i < 2; i++) {
-        float current = drive_motor[i]->measure.real_current;
-        float speed = fabsf(drive_motor[i]->measure.speed_rads);
-        if (current > STALL_CURRENT_THRESHOLD && speed < STALL_SPEED_THRESHOLD) {
-            stall_timer[i] += 0.005f;  // 200Hz, 每周期5ms
-            if (stall_timer[i] * 1000.0f > STALL_TIME_MS) {
-                LOGERROR("[IK] Drive motor %d stalled! current=%.2fA speed=%.2f rad/s", i, current, speed);
-                LK7015Stop(drive_motor[i]);
-                stall_persistent[i] = 1;
-                return 0;
-            }
-        } else {
-            stall_timer[i] = 0.0f;
-        }
-    }
 
     /* 3. 微小输入直接停止驱动，保持舵向 */
     if (fabsf(Vx) < 0.001f && fabsf(Vy) < 0.001f && fabsf(Wz) < 0.001f) {
@@ -238,7 +207,7 @@ uint8_t InverseKinematics_Drive(int8_t vx_level, int8_t vy_level, int8_t wz_leve
     for (int i = 0; i < 2; i++) {
         float vx_eff = Vx - y[i] * Wz;
         float vy_eff = Vy + x[i] * Wz;
-        delta_rad[i] = atan2f(vy_eff, vx_eff);
+        delta_rad[i] = atan2f(-vy_eff, vx_eff);
         v_mps[i] = sqrtf(vx_eff * vx_eff + vy_eff * vy_eff);
 
         /* 保持转向角在 [-PI/2, PI/2] 范围内，必要时反转驱动速度 */
@@ -269,76 +238,4 @@ uint8_t InverseKinematics_Drive(int8_t vx_level, int8_t vy_level, int8_t wz_leve
     }
 
     return 1;
-}
-
-/**
- * @brief 急停函数
- */
-void InverseKinematics_EmergencyStop(void)
-{
-    StopAllMotors();
-    stall_persistent[0] = 0;
-    stall_persistent[1] = 0;
-    show_active = 0;  // 终止展示
-}
-
-/**
- * @brief 一分钟展示函数 (200Hz 调用)
- */
-void InverseKinematics_ShowMotion(void)
-{
-    if (!show_active) {
-        /* 启动展示 */
-        if (!zero_calibrated) return;
-        if (!AllMotorsOnline()) return;
-        show_timer = 0.0f;
-        show_active = 1;
-    }
-
-    /* 检查电机在线，离线则退出展示 */
-    if (!AllMotorsOnline()) {
-        StopAllMotors();
-        show_active = 0;
-        return;
-    }
-
-    /* 每5ms累积时间 */
-    show_timer += 0.005f;
-
-    /* 定义展示序列 (低速运动，可自由调整) */
-    int8_t vx = 0, vy = 0, wz = 0;
-
-    if (show_timer < 10.0f) {
-        /* 0-10s: 原地逆时针自旋，速度档位3 */
-        wz = 3;
-    }
-    else if (show_timer < 25.0f) {
-        /* 10-25s: 斜向移动 (前进+左移)，档位2 */
-        vx = 2;
-        vy = 2;
-    }
-    else if (show_timer < 40.0f) {
-        /* 25-40s: 顺时针自旋，档位3 */
-        wz = -3;
-    }
-    else if (show_timer < 55.0f) {
-        /* 40-55s: 斜向移动 (后退+右移)，档位2 */
-        vx = -2;
-        vy = -2;
-    }
-    else if (show_timer < 60.0f) {
-        /* 55-60s: 停止 (保持舵向) */
-        vx = 0; vy = 0; wz = 0;
-    }
-    else {
-        /* 超过60秒，结束展示并停止 */
-        StopAllMotors();
-        show_active = 0;
-        return;
-    }
-
-    /* 调用驱动函数，若失败则停止展示 */
-    if (InverseKinematics_Drive(vx, vy, wz) == 0) {
-        show_active = 0;
-    }
 }

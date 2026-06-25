@@ -76,7 +76,10 @@ typedef struct
     float Measure;
     float Last_Measure;
     float Err;
+    float Err1;
+    float Err2;
     float Last_Err;
+    float Last_Last_Err;
     float Last_ITerm;
 
     float Pout;
@@ -132,5 +135,7 @@ void PIDInit(PIDInstance *pid, PID_Init_Config_s *config);
  * @return float  PID计算输出
  */
 float PIDCalculate(PIDInstance *pid, float measure, float ref);
-
+float PIDCalculate1(PIDInstance *pid, float measure, float ref);
+float PID_increment(PIDInstance *PID, float measure, float ref);
+void PIDReset(PIDInstance *pid);
 #endif
